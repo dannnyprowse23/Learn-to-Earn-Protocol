@@ -11,9 +11,15 @@
 (define-constant ERR_MODULE_NOT_ACTIVE (err u107))
 (define-constant ERR_INVALID_SCORE (err u108))
 (define-constant ERR_COOLDOWN_ACTIVE (err u109))
+(define-constant ERR_PATH_NOT_FOUND (err u110))
+(define-constant ERR_ALREADY_ENROLLED (err u111))
+(define-constant ERR_PREREQUISITE_NOT_MET (err u112))
+(define-constant ERR_PATH_NOT_COMPLETED (err u113))
+(define-constant ERR_BONUS_ALREADY_CLAIMED (err u114))
 
 (define-data-var next-module-id uint u1)
 (define-data-var next-quiz-id uint u1)
+(define-data-var next-path-id uint u1)
 (define-data-var contract-balance uint u0)
 (define-data-var total-rewards-distributed uint u0)
 (define-data-var platform-fee-percentage uint u5)
@@ -84,6 +90,32 @@
     rating: uint,
     review: (string-ascii 500),
     created-at: uint
+  }
+)
+
+(define-map learning-paths
+  uint
+  {
+    title: (string-ascii 100),
+    description: (string-ascii 500),
+    module-sequence: (list 10 uint),
+    bonus-reward: uint,
+    creator: principal,
+    is-active: bool,
+    enrollments: uint,
+    created-at: uint
+  }
+)
+
+(define-map user-path-progress
+  {user: principal, path-id: uint}
+  {
+    enrolled: bool,
+    current-module-index: uint,
+    completed: bool,
+    bonus-claimed: bool,
+    enrolled-at: uint,
+    completed-at: uint
   }
 )
 
@@ -236,6 +268,101 @@
   )
 )
 
+(define-public (create-learning-path (title (string-ascii 100)) (description (string-ascii 500)) (module-sequence (list 10 uint)) (bonus-reward uint))
+  (let ((path-id (var-get next-path-id)))
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> (len module-sequence) u0) ERR_INVALID_MODULE)
+    (asserts! (>= bonus-reward u0) ERR_INSUFFICIENT_FUNDS)
+    (try! (validate-module-sequence module-sequence))
+    (map-set learning-paths path-id {
+      title: title,
+      description: description,
+      module-sequence: module-sequence,
+      bonus-reward: bonus-reward,
+      creator: tx-sender,
+      is-active: true,
+      enrollments: u0,
+      created-at: stacks-block-height
+    })
+    (var-set next-path-id (+ path-id u1))
+    (ok path-id)
+  )
+)
+
+(define-public (enroll-in-path (path-id uint))
+  (let (
+    (path-data (unwrap! (map-get? learning-paths path-id) ERR_PATH_NOT_FOUND))
+    (existing-progress (map-get? user-path-progress {user: tx-sender, path-id: path-id}))
+  )
+    (asserts! (get is-active path-data) ERR_PATH_NOT_FOUND)
+    (asserts! (is-none existing-progress) ERR_ALREADY_ENROLLED)
+    (map-set user-path-progress {user: tx-sender, path-id: path-id} {
+      enrolled: true,
+      current-module-index: u0,
+      completed: false,
+      bonus-claimed: false,
+      enrolled-at: stacks-block-height,
+      completed-at: u0
+    })
+    (map-set learning-paths path-id (merge path-data {enrollments: (+ (get enrollments path-data) u1)}))
+    (ok true)
+  )
+)
+
+(define-public (advance-in-path (path-id uint))
+  (let (
+    (path-data (unwrap! (map-get? learning-paths path-id) ERR_PATH_NOT_FOUND))
+    (user-progress (unwrap! (map-get? user-path-progress {user: tx-sender, path-id: path-id}) ERR_PATH_NOT_FOUND))
+    (current-index (get current-module-index user-progress))
+    (module-sequence (get module-sequence path-data))
+    (current-module-id (unwrap! (element-at module-sequence current-index) ERR_INVALID_MODULE))
+    (module-progress (unwrap! (map-get? user-module-progress {user: tx-sender, module-id: current-module-id}) ERR_INVALID_MODULE))
+  )
+    (asserts! (get enrolled user-progress) ERR_PATH_NOT_FOUND)
+    (asserts! (not (get completed user-progress)) ERR_ALREADY_COMPLETED)
+    (asserts! (get completed module-progress) ERR_PREREQUISITE_NOT_MET)
+    (let ((next-index (+ current-index u1)))
+      (if (>= next-index (len module-sequence))
+        (begin
+          (map-set user-path-progress {user: tx-sender, path-id: path-id} (merge user-progress {
+            completed: true,
+            completed-at: stacks-block-height
+          }))
+          (ok {completed: true, next-module: none})
+        )
+        (begin
+          (map-set user-path-progress {user: tx-sender, path-id: path-id} (merge user-progress {
+            current-module-index: next-index
+          }))
+          (ok {completed: false, next-module: (element-at module-sequence next-index)})
+        )
+      )
+    )
+  )
+)
+
+(define-public (claim-path-bonus (path-id uint))
+  (let (
+    (path-data (unwrap! (map-get? learning-paths path-id) ERR_PATH_NOT_FOUND))
+    (user-progress (unwrap! (map-get? user-path-progress {user: tx-sender, path-id: path-id}) ERR_PATH_NOT_FOUND))
+    (user-profile (default-to {total-modules-completed: u0, total-rewards-earned: u0, streak: u0, last-activity: u0, level: u1, experience-points: u0} (map-get? user-profiles tx-sender)))
+    (bonus-amount (get bonus-reward path-data))
+  )
+    (asserts! (get completed user-progress) ERR_PATH_NOT_COMPLETED)
+    (asserts! (not (get bonus-claimed user-progress)) ERR_BONUS_ALREADY_CLAIMED)
+    (asserts! (>= (var-get contract-balance) bonus-amount) ERR_INSUFFICIENT_FUNDS)
+    (if (> bonus-amount u0)
+      (try! (stx-transfer? bonus-amount (as-contract tx-sender) tx-sender))
+      true
+    )
+    (map-set user-path-progress {user: tx-sender, path-id: path-id} (merge user-progress {bonus-claimed: true}))
+    (map-set user-profiles tx-sender (merge user-profile {total-rewards-earned: (+ (get total-rewards-earned user-profile) bonus-amount)}))
+    (var-set contract-balance (- (var-get contract-balance) bonus-amount))
+    (var-set total-rewards-distributed (+ (var-get total-rewards-distributed) bonus-amount))
+    (ok bonus-amount)
+  )
+)
+
 (define-read-only (get-module (module-id uint))
   (map-get? learning-modules module-id)
 )
@@ -260,10 +387,30 @@
   {
     total-modules: (- (var-get next-module-id) u1),
     total-quizzes: (- (var-get next-quiz-id) u1),
+    total-paths: (- (var-get next-path-id) u1),
     contract-balance: (var-get contract-balance),
     total-rewards-distributed: (var-get total-rewards-distributed),
     platform-fee: (var-get platform-fee-percentage)
   }
+)
+
+(define-read-only (get-learning-path (path-id uint))
+  (map-get? learning-paths path-id)
+)
+
+(define-read-only (get-user-path-progress (user principal) (path-id uint))
+  (map-get? user-path-progress {user: user, path-id: path-id})
+)
+
+(define-read-only (get-current-module-in-path (user principal) (path-id uint))
+  (let (
+    (path-data (unwrap! (map-get? learning-paths path-id) (err none)))
+    (user-progress (unwrap! (map-get? user-path-progress {user: user, path-id: path-id}) (err none)))
+    (current-index (get current-module-index user-progress))
+    (module-sequence (get module-sequence path-data))
+  )
+    (ok (element-at module-sequence current-index))
+  )
 )
 
 (define-read-only (get-module-review (module-id uint) (user principal))
@@ -288,5 +435,21 @@
         )
       )
     )
+  )
+)
+
+(define-private (validate-module-sequence (sequence (list 10 uint)))
+  (if (is-eq (len sequence) u0)
+    ERR_INVALID_MODULE
+    (fold validate-module-exists sequence (ok true))
+  )
+)
+
+(define-private (validate-module-exists (module-id uint) (prev-result (response bool uint)))
+  (match prev-result
+    success (if (is-some (map-get? learning-modules module-id))
+              (ok true)
+              ERR_INVALID_MODULE)
+    error (err error)
   )
 )
