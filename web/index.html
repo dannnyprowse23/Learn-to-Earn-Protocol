@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Learn-to-Earn Protocol</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <h1 class="nav-title">🎓 Learn-to-Earn</h1>
+            <div class="nav-links">
+                <button class="nav-btn" onclick="showSection('dashboard')">Dashboard</button>
+                <button class="nav-btn" onclick="showSection('modules')">Modules</button>
+                <button class="nav-btn" onclick="showSection('profile')">Profile</button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="main-content">
+        <div id="dashboard" class="section active">
+            <div class="hero">
+                <h2>Welcome to Learn-to-Earn Protocol</h2>
+                <p>Complete learning modules and earn STX rewards!</p>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <h3>Total Modules</h3>
+                    <p class="stat-value" id="totalModules">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Contract Balance</h3>
+                    <p class="stat-value" id="contractBalance">0 STX</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Rewards Distributed</h3>
+                    <p class="stat-value" id="totalRewards">0 STX</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Platform Fee</h3>
+                    <p class="stat-value" id="platformFee">5%</p>
+                </div>
+            </div>
+
+            <div class="wallet-section">
+                <h3>Wallet Connection</h3>
+                <button id="connectWallet" class="primary-btn">Connect Wallet</button>
+                <p id="walletStatus" class="wallet-status">Not connected</p>
+            </div>
+        </div>
+
+        <div id="modules" class="section">
+            <div class="section-header">
+                <h2>Learning Modules</h2>
+                <button class="primary-btn" onclick="showCreateModule()">Create Module</button>
+            </div>
+            
+            <div class="modules-grid" id="modulesList">
+                <div class="loading">Loading modules...</div>
+            </div>
+
+            <div id="createModuleModal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeModal('createModuleModal')">&times;</span>
+                    <h3>Create New Module</h3>
+                    <form id="createModuleForm">
+                        <input type="text" id="moduleTitle" placeholder="Module Title" required>
+                        <textarea id="moduleDescription" placeholder="Module Description" required></textarea>
+                        <input type="number" id="rewardAmount" placeholder="Reward Amount (STX)" required>
+                        <select id="difficultyLevel" required>
+                            <option value="">Select Difficulty</option>
+                            <option value="1">Beginner</option>
+                            <option value="2">Easy</option>
+                            <option value="3">Medium</option>
+                            <option value="4">Hard</option>
+                            <option value="5">Expert</option>
+                        </select>
+                        <button type="submit" class="primary-btn">Create Module</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div id="profile" class="section">
+            <div class="profile-header">
+                <h2>User Profile</h2>
+                <div class="profile-stats">
+                    <div class="profile-stat">
+                        <span class="stat-label">Level</span>
+                        <span class="stat-value" id="userLevel">1</span>
+                    </div>
+                    <div class="profile-stat">
+                        <span class="stat-label">Experience</span>
+                        <span class="stat-value" id="userExperience">0</span>
+                    </div>
+                    <div class="profile-stat">
+                        <span class="stat-label">Streak</span>
+                        <span class="stat-value" id="userStreak">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="progress-section">
+                <h3>Your Progress</h3>
+                <div class="progress-stats">
+                    <div class="progress-item">
+                        <span>Modules Completed</span>
+                        <span id="completedModules">0</span>
+                    </div>
+                    <div class="progress-item">
+                        <span>Total Rewards Earned</span>
+                        <span id="totalEarned">0 STX</span>
+                    </div>
+                </div>
+                <div id="userModules" class="user-modules">
+                    <div class="loading">Loading your modules...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div id="moduleModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('moduleModal')">&times;</span>
+            <div id="moduleContent">
+                <h3 id="modalModuleTitle"></h3>
+                <p id="modalModuleDescription"></p>
+                <div class="module-info">
+                    <span>Reward: <strong id="modalReward"></strong> STX</span>
+                    <span>Difficulty: <strong id="modalDifficulty"></strong></span>
+                </div>
+                <div class="quiz-section" id="quizSection">
+                    <h4>Quiz</h4>
+                    <div id="quizContent"></div>
+                </div>
+                <div class="action-buttons">
+                    <button id="completeModule" class="primary-btn">Complete Module</button>
+                    <button id="claimReward" class="success-btn" style="display: none;">Claim Reward</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="fundModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('fundModal')">&times;</span>
+            <h3>Fund Contract</h3>
+            <form id="fundForm">
+                <input type="number" id="fundAmount" placeholder="Amount (STX)" required>
+                <button type="submit" class="primary-btn">Fund Contract</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
