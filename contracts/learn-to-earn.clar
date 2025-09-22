@@ -16,13 +16,24 @@
 (define-constant ERR_PREREQUISITE_NOT_MET (err u112))
 (define-constant ERR_PATH_NOT_COMPLETED (err u113))
 (define-constant ERR_BONUS_ALREADY_CLAIMED (err u114))
+(define-constant ERR_MENTOR_NOT_FOUND (err u115))
+(define-constant ERR_MENTORSHIP_NOT_FOUND (err u116))
+(define-constant ERR_SESSION_NOT_FOUND (err u117))
+(define-constant ERR_ALREADY_MENTOR (err u118))
+(define-constant ERR_CANNOT_MENTOR_SELF (err u119))
+(define-constant ERR_SESSION_ALREADY_COMPLETED (err u120))
+(define-constant ERR_INSUFFICIENT_LEVEL (err u121))
+(define-constant ERR_MENTOR_UNAVAILABLE (err u122))
 
 (define-data-var next-module-id uint u1)
 (define-data-var next-quiz-id uint u1)
 (define-data-var next-path-id uint u1)
+(define-data-var next-session-id uint u1)
 (define-data-var contract-balance uint u0)
 (define-data-var total-rewards-distributed uint u0)
 (define-data-var platform-fee-percentage uint u5)
+(define-data-var mentor-reward-per-session uint u1000)
+(define-data-var min-mentor-level uint u3)
 
 (define-map learning-modules 
   uint 
@@ -116,6 +127,43 @@
     bonus-claimed: bool,
     enrolled-at: uint,
     completed-at: uint
+  }
+)
+
+(define-map mentors
+  principal
+  {
+    is-active: bool,
+    specialties: (list 5 uint),
+    total-sessions: uint,
+    successful-sessions: uint,
+    rating: uint,
+    total-earned: uint,
+    joined-at: uint
+  }
+)
+
+(define-map mentorship-sessions
+  uint
+  {
+    mentor: principal,
+    mentee: principal,
+    module-id: uint,
+    status: uint,
+    created-at: uint,
+    completed-at: uint,
+    mentor-rating: uint,
+    mentee-rating: uint,
+    reward-claimed: bool
+  }
+)
+
+(define-map mentorship-requests
+  {mentee: principal, module-id: uint}
+  {
+    created-at: uint,
+    matched: bool,
+    session-id: (optional uint)
   }
 )
 
@@ -363,6 +411,156 @@
   )
 )
 
+(define-public (become-mentor (specialties (list 5 uint)))
+  (let (
+    (user-profile (default-to {total-modules-completed: u0, total-rewards-earned: u0, streak: u0, last-activity: u0, level: u1, experience-points: u0} (map-get? user-profiles tx-sender)))
+    (existing-mentor (map-get? mentors tx-sender))
+  )
+    (asserts! (>= (get level user-profile) (var-get min-mentor-level)) ERR_INSUFFICIENT_LEVEL)
+    (asserts! (is-none existing-mentor) ERR_ALREADY_MENTOR)
+    (asserts! (> (len specialties) u0) ERR_INVALID_MODULE)
+    (try! (validate-specialty-modules specialties))
+    (map-set mentors tx-sender {
+      is-active: true,
+      specialties: specialties,
+      total-sessions: u0,
+      successful-sessions: u0,
+      rating: u50,
+      total-earned: u0,
+      joined-at: stacks-block-height
+    })
+    (ok true)
+  )
+)
+
+(define-public (update-mentor-status (active bool))
+  (let ((mentor-data (unwrap! (map-get? mentors tx-sender) ERR_MENTOR_NOT_FOUND)))
+    (map-set mentors tx-sender (merge mentor-data {is-active: active}))
+    (ok active)
+  )
+)
+
+(define-public (request-mentor (module-id uint))
+  (let (
+    (module-data (unwrap! (map-get? learning-modules module-id) ERR_INVALID_MODULE))
+    (existing-request (map-get? mentorship-requests {mentee: tx-sender, module-id: module-id}))
+  )
+    (asserts! (get is-active module-data) ERR_MODULE_NOT_ACTIVE)
+    (asserts! (is-none existing-request) ERR_ALREADY_ENROLLED)
+    (map-set mentorship-requests {mentee: tx-sender, module-id: module-id} {
+      created-at: stacks-block-height,
+      matched: false,
+      session-id: none
+    })
+    (ok true)
+  )
+)
+
+(define-public (accept-mentorship (mentee principal) (module-id uint))
+  (let (
+    (mentor-data (unwrap! (map-get? mentors tx-sender) ERR_MENTOR_NOT_FOUND))
+    (request-data (unwrap! (map-get? mentorship-requests {mentee: mentee, module-id: module-id}) ERR_MENTORSHIP_NOT_FOUND))
+    (session-id (var-get next-session-id))
+  )
+    (asserts! (get is-active mentor-data) ERR_MENTOR_UNAVAILABLE)
+    (asserts! (not (get matched request-data)) ERR_ALREADY_ENROLLED)
+    (asserts! (not (is-eq tx-sender mentee)) ERR_CANNOT_MENTOR_SELF)
+    (asserts! (is-mentor-qualified tx-sender module-id) ERR_INSUFFICIENT_LEVEL)
+    (map-set mentorship-sessions session-id {
+      mentor: tx-sender,
+      mentee: mentee,
+      module-id: module-id,
+      status: u1,
+      created-at: stacks-block-height,
+      completed-at: u0,
+      mentor-rating: u0,
+      mentee-rating: u0,
+      reward-claimed: false
+    })
+    (map-set mentorship-requests {mentee: mentee, module-id: module-id} (merge request-data {
+      matched: true,
+      session-id: (some session-id)
+    }))
+    (var-set next-session-id (+ session-id u1))
+    (ok session-id)
+  )
+)
+
+(define-public (complete-mentorship-session (session-id uint))
+  (let (
+    (session-data (unwrap! (map-get? mentorship-sessions session-id) ERR_SESSION_NOT_FOUND))
+  )
+    (asserts! (or (is-eq tx-sender (get mentor session-data)) (is-eq tx-sender (get mentee session-data))) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status session-data) u1) ERR_SESSION_ALREADY_COMPLETED)
+    (map-set mentorship-sessions session-id (merge session-data {
+      status: u2,
+      completed-at: stacks-block-height
+    }))
+    (ok true)
+  )
+)
+
+(define-public (rate-mentorship (session-id uint) (rating uint))
+  (let (
+    (session-data (unwrap! (map-get? mentorship-sessions session-id) ERR_SESSION_NOT_FOUND))
+    (is-mentor (is-eq tx-sender (get mentor session-data)))
+    (is-mentee (is-eq tx-sender (get mentee session-data)))
+  )
+    (asserts! (or is-mentor is-mentee) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status session-data) u2) ERR_SESSION_NOT_FOUND)
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR_INVALID_SCORE)
+    (map-set mentorship-sessions session-id
+      (if is-mentor
+        (merge session-data {mentor-rating: rating})
+        (merge session-data {mentee-rating: rating})
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (claim-mentorship-reward (session-id uint))
+  (let (
+    (session-data (unwrap! (map-get? mentorship-sessions session-id) ERR_SESSION_NOT_FOUND))
+    (mentor-data (unwrap! (map-get? mentors (get mentor session-data)) ERR_MENTOR_NOT_FOUND))
+    (reward-amount (var-get mentor-reward-per-session))
+  )
+    (asserts! (is-eq tx-sender (get mentor session-data)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status session-data) u2) ERR_SESSION_NOT_FOUND)
+    (asserts! (not (get reward-claimed session-data)) ERR_REWARD_ALREADY_CLAIMED)
+    (asserts! (> (get mentee-rating session-data) u0) ERR_INVALID_SCORE)
+    (asserts! (>= (var-get contract-balance) reward-amount) ERR_INSUFFICIENT_FUNDS)
+    (let (
+        (is-successful (>= (get mentee-rating session-data) u3))
+        (final-reward (if is-successful reward-amount (/ reward-amount u2)))
+      )
+      (try! (stx-transfer? final-reward (as-contract tx-sender) tx-sender))
+      (map-set mentorship-sessions session-id (merge session-data {reward-claimed: true}))
+      (map-set mentors (get mentor session-data) (merge mentor-data {
+        total-sessions: (+ (get total-sessions mentor-data) u1),
+        successful-sessions: (if is-successful
+          (+ (get successful-sessions mentor-data) u1)
+          (get successful-sessions mentor-data)
+        ),
+        rating: (calculate-mentor-rating (get mentor session-data) (get mentee-rating session-data)),
+        total-earned: (+ (get total-earned mentor-data) final-reward)
+      }))
+      (var-set contract-balance (- (var-get contract-balance) final-reward))
+      (var-set total-rewards-distributed (+ (var-get total-rewards-distributed) final-reward))
+      (ok final-reward)
+    )
+  )
+)
+
+(define-public (update-mentor-rewards (new-reward uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> new-reward u0) ERR_INVALID_SCORE)
+    (var-set mentor-reward-per-session new-reward)
+    (ok new-reward)
+  )
+)
+
 (define-read-only (get-module (module-id uint))
   (map-get? learning-modules module-id)
 )
@@ -417,6 +615,26 @@
   (map-get? module-reviews {module-id: module-id, user: user})
 )
 
+(define-read-only (get-mentor-profile (mentor principal))
+  (map-get? mentors mentor)
+)
+
+(define-read-only (get-mentorship-session (session-id uint))
+  (map-get? mentorship-sessions session-id)
+)
+
+(define-read-only (get-mentorship-request (mentee principal) (module-id uint))
+  (map-get? mentorship-requests {mentee: mentee, module-id: module-id})
+)
+
+(define-read-only (get-mentorship-stats)
+  {
+    total-mentors: (var-get next-session-id),
+    mentor-reward-per-session: (var-get mentor-reward-per-session),
+    min-mentor-level: (var-get min-mentor-level)
+  }
+)
+
 (define-private (calculate-streak (user principal))
   (let ((profile (default-to {total-modules-completed: u0, total-rewards-earned: u0, streak: u0, last-activity: u0, level: u1, experience-points: u0} (map-get? user-profiles user))))
     (if (< (- stacks-block-height (get last-activity profile)) u1440)
@@ -451,5 +669,34 @@
               (ok true)
               ERR_INVALID_MODULE)
     error (err error)
+  )
+)
+
+(define-private (validate-specialty-modules (specialties (list 5 uint)))
+  (if (is-eq (len specialties) u0)
+    ERR_INVALID_MODULE
+    (fold validate-module-exists specialties (ok true))
+  )
+)
+
+(define-private (is-mentor-qualified (mentor principal) (module-id uint))
+  (match (map-get? mentors mentor)
+    mentor-data (is-some (index-of? (get specialties mentor-data) module-id))
+    false
+  )
+)
+
+(define-private (calculate-mentor-rating (mentor principal) (new-rating uint))
+  (match (map-get? mentors mentor)
+    mentor-data (let (
+        (current-rating (get rating mentor-data))
+        (total-sessions (get total-sessions mentor-data))
+      )
+      (if (is-eq total-sessions u0)
+        new-rating
+        (/ (+ (* current-rating total-sessions) new-rating) (+ total-sessions u1))
+      )
+    )
+    u0
   )
 )
