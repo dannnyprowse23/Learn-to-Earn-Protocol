@@ -24,6 +24,16 @@
 (define-constant ERR_SESSION_ALREADY_COMPLETED (err u120))
 (define-constant ERR_INSUFFICIENT_LEVEL (err u121))
 (define-constant ERR_MENTOR_UNAVAILABLE (err u122))
+(define-constant ERR_BADGE_NOT_FOUND (err u123))
+(define-constant ERR_BADGE_ALREADY_EARNED (err u124))
+(define-constant ERR_BADGE_REQUIREMENTS_NOT_MET (err u125))
+
+(define-constant BADGE_FIRST_MODULE u1)
+(define-constant BADGE_PATH_COMPLETION u2)
+(define-constant BADGE_MENTOR_STATUS u3)
+(define-constant BADGE_FIVE_MODULES u4)
+(define-constant BADGE_PERFECT_SCORE u5)
+(define-constant BADGE_FAST_LEARNER u6)
 
 (define-data-var next-module-id uint u1)
 (define-data-var next-quiz-id uint u1)
@@ -164,6 +174,27 @@
     created-at: uint,
     matched: bool,
     session-id: (optional uint)
+  }
+)
+
+(define-map achievement-badges
+  uint
+  {
+    name: (string-ascii 50),
+    description: (string-ascii 200),
+    badge-type: uint,
+    requirement-value: uint,
+    is-active: bool,
+    total-earned: uint
+  }
+)
+
+(define-map user-badges
+  {user: principal, badge-id: uint}
+  {
+    earned: bool,
+    earned-at: uint,
+    metadata: (string-ascii 100)
   }
 )
 
@@ -561,6 +592,66 @@
   )
 )
 
+(define-public (create-badge (name (string-ascii 50)) (description (string-ascii 200)) (badge-type uint) (requirement-value uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (and (>= badge-type u1) (<= badge-type u6)) ERR_INVALID_MODULE)
+    (map-set achievement-badges badge-type {
+      name: name,
+      description: description,
+      badge-type: badge-type,
+      requirement-value: requirement-value,
+      is-active: true,
+      total-earned: u0
+    })
+    (ok badge-type)
+  )
+)
+
+(define-public (claim-badge (badge-id uint))
+  (let (
+    (badge-data (unwrap! (map-get? achievement-badges badge-id) ERR_BADGE_NOT_FOUND))
+    (user-profile (default-to {total-modules-completed: u0, total-rewards-earned: u0, streak: u0, last-activity: u0, level: u1, experience-points: u0} (map-get? user-profiles tx-sender)))
+    (existing-badge (map-get? user-badges {user: tx-sender, badge-id: badge-id}))
+  )
+    (asserts! (get is-active badge-data) ERR_BADGE_NOT_FOUND)
+    (asserts! (is-none existing-badge) ERR_BADGE_ALREADY_EARNED)
+    (asserts! (check-badge-requirements badge-id (get badge-type badge-data) (get requirement-value badge-data) user-profile) ERR_BADGE_REQUIREMENTS_NOT_MET)
+    (map-set user-badges {user: tx-sender, badge-id: badge-id} {
+      earned: true,
+      earned-at: stacks-block-height,
+      metadata: ""
+    })
+    (map-set achievement-badges badge-id (merge badge-data {total-earned: (+ (get total-earned badge-data) u1)}))
+    (ok true)
+  )
+)
+
+(define-public (auto-award-badge (user principal) (badge-id uint))
+  (let (
+    (badge-data (unwrap! (map-get? achievement-badges badge-id) ERR_BADGE_NOT_FOUND))
+    (existing-badge (map-get? user-badges {user: user, badge-id: badge-id}))
+  )
+    (asserts! (get is-active badge-data) ERR_BADGE_NOT_FOUND)
+    (asserts! (is-none existing-badge) ERR_BADGE_ALREADY_EARNED)
+    (map-set user-badges {user: user, badge-id: badge-id} {
+      earned: true,
+      earned-at: stacks-block-height,
+      metadata: "auto-awarded"
+    })
+    (map-set achievement-badges badge-id (merge badge-data {total-earned: (+ (get total-earned badge-data) u1)}))
+    (ok true)
+  )
+)
+
+(define-public (toggle-badge-status (badge-id uint))
+  (let ((badge-data (unwrap! (map-get? achievement-badges badge-id) ERR_BADGE_NOT_FOUND)))
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (map-set achievement-badges badge-id (merge badge-data {is-active: (not (get is-active badge-data))}))
+    (ok (not (get is-active badge-data)))
+  )
+)
+
 (define-read-only (get-module (module-id uint))
   (map-get? learning-modules module-id)
 )
@@ -635,6 +726,21 @@
   }
 )
 
+(define-read-only (get-badge (badge-id uint))
+  (map-get? achievement-badges badge-id)
+)
+
+(define-read-only (get-user-badge (user principal) (badge-id uint))
+  (map-get? user-badges {user: user, badge-id: badge-id})
+)
+
+(define-read-only (has-badge (user principal) (badge-id uint))
+  (match (map-get? user-badges {user: user, badge-id: badge-id})
+    badge-data (get earned badge-data)
+    false
+  )
+)
+
 (define-private (calculate-streak (user principal))
   (let ((profile (default-to {total-modules-completed: u0, total-rewards-earned: u0, streak: u0, last-activity: u0, level: u1, experience-points: u0} (map-get? user-profiles user))))
     (if (< (- stacks-block-height (get last-activity profile)) u1440)
@@ -698,5 +804,41 @@
       )
     )
     u0
+  )
+)
+
+(define-private (check-badge-requirements (badge-id uint) (badge-type uint) (requirement-value uint) (user-profile {total-modules-completed: uint, total-rewards-earned: uint, streak: uint, last-activity: uint, level: uint, experience-points: uint}))
+  (if (is-eq badge-type BADGE_FIRST_MODULE)
+    (>= (get total-modules-completed user-profile) u1)
+    (if (is-eq badge-type BADGE_PATH_COMPLETION)
+      (check-path-completion tx-sender)
+      (if (is-eq badge-type BADGE_MENTOR_STATUS)
+        (is-some (map-get? mentors tx-sender))
+        (if (is-eq badge-type BADGE_FIVE_MODULES)
+          (>= (get total-modules-completed user-profile) u5)
+          (if (is-eq badge-type BADGE_PERFECT_SCORE)
+            (check-perfect-score tx-sender)
+            (if (is-eq badge-type BADGE_FAST_LEARNER)
+              (>= (get streak user-profile) requirement-value)
+              false
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+(define-private (check-path-completion (user principal))
+  (match (map-get? user-path-progress {user: user, path-id: u1})
+    progress (get completed progress)
+    false
+  )
+)
+
+(define-private (check-perfect-score (user principal))
+  (match (map-get? user-module-progress {user: user, module-id: u1})
+    progress (is-eq (get score progress) u100)
+    false
   )
 )
