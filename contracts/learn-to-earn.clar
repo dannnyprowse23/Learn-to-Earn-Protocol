@@ -27,6 +27,10 @@
 (define-constant ERR_BADGE_NOT_FOUND (err u123))
 (define-constant ERR_BADGE_ALREADY_EARNED (err u124))
 (define-constant ERR_BADGE_REQUIREMENTS_NOT_MET (err u125))
+(define-constant ERR_ALREADY_REFERRED (err u126))
+(define-constant ERR_SELF_REFERRAL (err u127))
+(define-constant ERR_REFERRER_NOT_FOUND (err u128))
+(define-constant ERR_REFERRAL_INACTIVE (err u129))
 
 (define-constant BADGE_FIRST_MODULE u1)
 (define-constant BADGE_PATH_COMPLETION u2)
@@ -44,6 +48,9 @@
 (define-data-var platform-fee-percentage uint u5)
 (define-data-var mentor-reward-per-session uint u1000)
 (define-data-var min-mentor-level uint u3)
+(define-data-var referral-reward uint u500)
+(define-data-var referral-bonus-percentage uint u10)
+(define-data-var referral-system-active bool true)
 
 (define-map learning-modules 
   uint 
@@ -195,6 +202,26 @@
     earned: bool,
     earned-at: uint,
     metadata: (string-ascii 100)
+  }
+)
+
+(define-map referrals
+  principal
+  {
+    referrer: (optional principal),
+    referred-users: uint,
+    total-referral-rewards: uint,
+    is-referred: bool,
+    referred-at: uint
+  }
+)
+
+(define-map referral-rewards-claimed
+  {referrer: principal, referee: principal}
+  {
+    claimed: bool,
+    claimed-at: uint,
+    reward-amount: uint
   }
 )
 
@@ -652,6 +679,60 @@
   )
 )
 
+(define-public (register-with-referral (referrer principal))
+  (let (
+    (existing-referral (map-get? referrals tx-sender))
+    (referrer-data (default-to {referrer: none, referred-users: u0, total-referral-rewards: u0, is-referred: false, referred-at: u0} (map-get? referrals referrer)))
+  )
+    (asserts! (var-get referral-system-active) ERR_REFERRAL_INACTIVE)
+    (asserts! (not (is-eq tx-sender referrer)) ERR_SELF_REFERRAL)
+    (asserts! (is-none existing-referral) ERR_ALREADY_REFERRED)
+    (map-set referrals tx-sender {
+      referrer: (some referrer),
+      referred-users: u0,
+      total-referral-rewards: u0,
+      is-referred: true,
+      referred-at: stacks-block-height
+    })
+    (map-set referrals referrer (merge referrer-data {referred-users: (+ (get referred-users referrer-data) u1)}))
+    (ok true)
+  )
+)
+
+(define-public (claim-referral-reward (referee principal))
+  (let (
+    (referee-data (unwrap! (map-get? referrals referee) ERR_REFERRER_NOT_FOUND))
+    (referee-profile (unwrap! (map-get? user-profiles referee) ERR_REFERRER_NOT_FOUND))
+    (referrer-data (default-to {referrer: none, referred-users: u0, total-referral-rewards: u0, is-referred: false, referred-at: u0} (map-get? referrals tx-sender)))
+    (existing-claim (map-get? referral-rewards-claimed {referrer: tx-sender, referee: referee}))
+    (reward-amount (var-get referral-reward))
+  )
+    (asserts! (var-get referral-system-active) ERR_REFERRAL_INACTIVE)
+    (asserts! (is-eq (get referrer referee-data) (some tx-sender)) ERR_REFERRER_NOT_FOUND)
+    (asserts! (is-none existing-claim) ERR_REWARD_ALREADY_CLAIMED)
+    (asserts! (>= (get total-modules-completed referee-profile) u1) ERR_PREREQUISITE_NOT_MET)
+    (map-set referral-rewards-claimed {referrer: tx-sender, referee: referee} {
+      claimed: true,
+      claimed-at: stacks-block-height,
+      reward-amount: reward-amount
+    })
+    (map-set referrals tx-sender (merge referrer-data {total-referral-rewards: (+ (get total-referral-rewards referrer-data) reward-amount)}))
+    (var-set total-rewards-distributed (+ (var-get total-rewards-distributed) reward-amount))
+    (ok reward-amount)
+  )
+)
+
+(define-public (update-referral-settings (new-reward uint) (new-bonus-percentage uint) (is-active bool))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= new-bonus-percentage u100) ERR_INVALID_SCORE)
+    (var-set referral-reward new-reward)
+    (var-set referral-bonus-percentage new-bonus-percentage)
+    (var-set referral-system-active is-active)
+    (ok true)
+  )
+)
+
 (define-read-only (get-module (module-id uint))
   (map-get? learning-modules module-id)
 )
@@ -738,6 +819,29 @@
   (match (map-get? user-badges {user: user, badge-id: badge-id})
     badge-data (get earned badge-data)
     false
+  )
+)
+
+(define-read-only (get-referral-data (user principal))
+  (map-get? referrals user)
+)
+
+(define-read-only (get-referral-reward-status (referrer principal) (referee principal))
+  (map-get? referral-rewards-claimed {referrer: referrer, referee: referee})
+)
+
+(define-read-only (get-referral-stats)
+  {
+    referral-reward: (var-get referral-reward),
+    referral-bonus-percentage: (var-get referral-bonus-percentage),
+    referral-system-active: (var-get referral-system-active)
+  }
+)
+
+(define-read-only (get-referrer (user principal))
+  (match (map-get? referrals user)
+    referral-data (get referrer referral-data)
+    none
   )
 )
 
